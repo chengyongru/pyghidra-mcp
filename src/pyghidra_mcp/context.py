@@ -52,6 +52,14 @@ class PyGhidraContext:
     Manages a Ghidra project, including its creation, program imports, and cleanup.
     """
 
+    # Lock file patterns used by Ghidra for project locking
+    _LOCK_FILE_PATTERNS = ["*.lock", "*.lock~"]
+
+    # Maximum retry attempts after LockException (1 retry = 2 total attempts).
+    # This handles stale locks from crashes while avoiding infinite loops
+    # if another process legitimately holds the lock.
+    _MAX_LOCK_RETRIES = 1
+
     def __init__(
         self,
         project_name: str,
@@ -145,25 +153,85 @@ class PyGhidraContext:
         """
         Creates a new Ghidra project if it doesn't exist, otherwise opens the existing project.
 
+        Handles stale lock files from previous crashes by automatically cleaning and retrying.
+
         Returns:
             The Ghidra project object.
-        """
 
+        Raises:
+            RuntimeError: If unable to open project after lock cleanup and retry.
+        """
         from ghidra.base.project import GhidraProject
         from ghidra.framework.model import ProjectLocator
+        from ghidra.framework.store import LockException
 
         project_dir = self.project_path / self.project_name
         project_dir.mkdir(exist_ok=True, parents=True)
         project_dir_str = str(project_dir.absolute())
-
         locator = ProjectLocator(project_dir_str, self.project_name)
 
-        if locator.exists():
-            logger.info(f"Opening existing project: {self.project_name}")
-            return GhidraProject.openProject(project_dir_str, self.project_name, True)
-        else:
+        if not locator.exists():
             logger.info(f"Creating new project: {self.project_name}")
             return GhidraProject.createProject(project_dir_str, self.project_name, False)
+
+        # Try opening with stale lock recovery
+        for attempt in range(self._MAX_LOCK_RETRIES + 1):
+            try:
+                logger.info(f"Opening existing project: {self.project_name}")
+                return GhidraProject.openProject(project_dir_str, self.project_name, True)
+            except LockException:
+                if attempt >= self._MAX_LOCK_RETRIES:
+                    raise RuntimeError(
+                        f"Failed to open project '{self.project_name}' after {attempt + 1} attempt(s). "
+                        f"Another Ghidra instance may be using this project."
+                    ) from None
+
+                # List lock files for diagnostic info
+                lock_files = [
+                    f for pattern in self._LOCK_FILE_PATTERNS
+                    for f in project_dir.glob(pattern)
+                ]
+                logger.warning(
+                    f"Project locked. Found {len(lock_files)} lock file(s): "
+                    f"{[f.name for f in lock_files]}. Cleaning stale locks..."
+                )
+                self._clean_lock_files(project_dir)
+
+    @staticmethod
+    def _clean_lock_files(project_dir: Path) -> list[str]:
+        """
+        Remove stale Ghidra lock files from a project directory.
+
+        WARNING: This method deletes files without additional confirmation.
+        In multi-user environments, ensure no other Ghidra instance is actively
+        using the project before calling this method.
+
+        This is called when opening a project fails due to LockException,
+        typically caused by previous crashes or forced process termination.
+
+        Args:
+            project_dir: Path to the Ghidra project directory.
+
+        Returns:
+            List of successfully removed lock file names.
+        """
+        removed = []
+
+        for pattern in PyGhidraContext._LOCK_FILE_PATTERNS:
+            for lock_file in project_dir.glob(pattern):
+                try:
+                    lock_file.unlink()
+                    removed.append(lock_file.name)
+                    logger.info(f"Removed lock file: {lock_file}")
+                except OSError as e:
+                    logger.warning(f"Could not remove lock file {lock_file}: {e}")
+
+        if removed:
+            logger.info(f"Successfully cleaned {len(removed)} lock file(s): {', '.join(removed)}")
+        else:
+            logger.warning("No lock files were removed (may be held by another process)")
+
+        return removed
 
     def _init_project_programs(self):
         """
@@ -173,9 +241,19 @@ class PyGhidraContext:
 
         all_binary_paths = self.list_binaries()
         for binary_path_s in all_binary_paths:
-            binary_path = Path(binary_path_s)
+            # Get the parent folder path and filename from Ghidra pathname
+            # Ghidra pathnames use '/' as separator and are relative to project root
+            if '/' in binary_path_s:
+                folder_path, program_name = binary_path_s.rsplit('/', 1)
+                # Ensure folder_path starts with '/' for absolute path within project
+                if not folder_path.startswith('/'):
+                    folder_path = '/' + folder_path
+            else:
+                folder_path = '/'
+                program_name = binary_path_s
+
             program: Program = self.project.openProgram(
-                str(binary_path.parent), binary_path.name, False
+                folder_path, program_name, False
             )
             program_info = self._init_program_info(program)
             self.programs[binary_path_s] = program_info
