@@ -1,18 +1,13 @@
 import concurrent.futures
 import hashlib
-import json
 import multiprocessing
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any, ClassVar, Union
 
-import chromadb
 import pyghidra  # noqa
-from chromadb.config import Settings
 from loguru import logger
-
-from pyghidra_mcp.tools import GhidraTools
 
 if TYPE_CHECKING:
     from ghidra.app.decompiler import DecompInterface
@@ -34,8 +29,6 @@ class ProgramInfo:
     ghidra_analysis_complete: bool
     file_path: Path | None = None
     load_time: float | None = None
-    code_collection: chromadb.Collection | None = None
-    strings_collection: chromadb.Collection | None = None
 
     @property
     def analysis_complete(self) -> bool:
@@ -49,7 +42,7 @@ class PyGhidraContext:
     """
 
     # Lock file patterns used by Ghidra for project locking
-    _LOCK_FILE_PATTERNS = ["*.lock", "*.lock~"]
+    _LOCK_FILE_PATTERNS: ClassVar[list[str]] = ["*.lock", "*.lock~"]
 
     # Maximum retry attempts after LockException (1 retry = 2 total attempts).
     # This handles stale locks from crashes while avoiding infinite loops
@@ -94,12 +87,6 @@ class PyGhidraContext:
 
         self.programs: dict[str, ProgramInfo] = {}
         self._init_project_programs()
-
-        project_dir = self.project_path / self.project_name
-        chromadb_path = project_dir / "chromadb"
-        self.chroma_client = chromadb.PersistentClient(
-            path=str(chromadb_path), settings=Settings(anonymized_telemetry=False)
-        )
 
         # From GhidraDiffEngine
         self.force_analysis = force_analysis
@@ -180,7 +167,8 @@ class PyGhidraContext:
             except LockException:
                 if attempt >= self._MAX_LOCK_RETRIES:
                     raise RuntimeError(
-                        f"Failed to open project '{self.project_name}' after {attempt + 1} attempt(s). "
+                        f"Failed to open project '{self.project_name}' "
+                        f"after {attempt + 1} attempt(s). "
                         f"Another Ghidra instance may be using this project."
                     ) from None
 
@@ -370,7 +358,6 @@ class PyGhidraContext:
 
         if analyze:
             self.analyze_program(program_info.program)
-            self._init_chroma_collections_for_program(program_info)
 
         logger.info(f"Program {program_name} is ready for use.")
 
@@ -508,16 +495,9 @@ class PyGhidraContext:
                 )
         if not program_info.analysis_complete:
             raise RuntimeError(
-                json.dumps(
-                    {
-                        "message": f"Analysis incomplete for binary '{binary_name}'.",
-                        "binary_name": binary_name,
-                        "ghidra_analysis_complete": program_info.ghidra_analysis_complete,
-                        "code_collection": program_info.code_collection is not None,
-                        "strings_collection": program_info.strings_collection is not None,
-                        "suggestion": "Wait and try tool call again.",
-                    }
-                )
+                f"Analysis incomplete for binary '{binary_name}'. "
+                f"Ghidra analysis: {program_info.ghidra_analysis_complete}. "
+                "Wait and try tool call again."
             )
         return program_info
 
@@ -537,8 +517,6 @@ class PyGhidraContext:
             ghidra_analysis_complete=False,
             file_path=metadata["Executable Location"],
             load_time=time.time(),
-            code_collection=None,
-            strings_collection=None,
         )
 
         return program_info
@@ -562,122 +540,13 @@ class PyGhidraContext:
 
         return "-".join((path.name, _sha1_file(path.absolute())[:6]))
 
-    def _init_chroma_code_collection_for_program(self, program_info: ProgramInfo):
-        """
-        Initialize Chroma code collection for a single program.
-        """
-        from ghidra.program.model.listing import Function
-
-        logger.info(f"Initializing Chroma code collection for {program_info.name}")
-        try:
-            collection = self.chroma_client.get_collection(name=program_info.name)
-            logger.info(f"Collection '{program_info.name}' exists; skipping code ingest.")
-            program_info.code_collection = collection
-        except Exception as e:
-            logger.info(f"Creating new code collection '{program_info.name}'")
-            tools = GhidraTools(program_info)
-            functions = tools.get_all_functions()
-            decompiles = []
-            ids = []
-            metadatas = []
-
-            for i, func in enumerate(functions):
-                func: Function
-                try:
-                    if i % 10 == 0:
-                        logger.debug(f"Decompiling {i}/{len(functions)}")
-                    decompiled = tools.decompile_function(func)
-                    decompiles.append(decompiled.code)
-                    ids.append(decompiled.name)
-                    metadatas.append(
-                        {
-                            "function_name": decompiled.name,
-                            "entry_point": str(func.getEntryPoint()),
-                        }
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to decompile {func.getSymbol().getName(True)}: {e}")
-
-            collection = self.chroma_client.create_collection(name=program_info.name)
-            try:
-                collection.add(
-                    documents=decompiles,
-                    metadatas=metadatas,
-                    ids=ids,
-                )
-            except Exception as e:
-                logger.error(f"Failed add decompiles to collection: {e}")
-
-            logger.info(f"Code analysis complete for collection '{program_info.name}'")
-            program_info.code_collection = collection
-
-    def _init_chroma_strings_collection_for_program(self, program_info: ProgramInfo):
-        """
-        Initialize Chroma strings collection for a single program.
-        """
-        collection_name = f"{program_info.name}_strings"
-        logger.info(f"Initializing Chroma strings collection for {program_info.name}")
-        try:
-            strings_collection = self.chroma_client.get_collection(name=collection_name)
-            logger.info(f"Collection '{collection_name}' exists; skipping strings ingest.")
-            program_info.strings_collection = strings_collection
-        except Exception:
-            logger.info(f"Creating new strings collection '{collection_name}'")
-            tools = GhidraTools(program_info)
-
-            ids = []
-            strings = tools.get_all_strings()
-            metadatas = [{"address": str(s.address)} for s in strings]
-            ids = [str(s.address) for s in strings]
-            strings = [s.value for s in strings]
-
-            strings_collection = self.chroma_client.create_collection(name=collection_name)
-            try:
-                strings_collection.add(
-                    documents=strings,
-                    metadatas=metadatas,  # type: ignore
-                    ids=ids,
-                )
-            except Exception as e:
-                logger.error(f"Failed to add strings to collection: {e}")
-
-            logger.info(f"Strings analysis complete for collection '{collection_name}'")
-            program_info.strings_collection = strings_collection
-
-    def _init_chroma_collections_for_program(self, program_info: ProgramInfo):
-        """
-        Initializes all Chroma collections (code and strings) for a single program.
-        """
-        self._init_chroma_code_collection_for_program(program_info)
-        self._init_chroma_strings_collection_for_program(program_info)
-
-    def _init_all_chroma_collections(self):
-        """
-        Initializes Chroma collections for all programs in the project.
-        If an executor is available, tasks are submitted asynchronously.
-        Otherwise, initialization runs in the main thread.
-        """
-        programs = list(self.programs.values())
-        mode = "background" if self.executor else "main thread"
-        logger.info("Initializing Chroma DB collections in %s...", mode)
-
-        # ensure analysis complete before init
-        assert all(prog.analysis_complete for prog in programs)
-
-        if self.executor:
-            # executor.map submits all tasks at once, returns an iterator of futures
-            self.executor.map(self._init_chroma_collections_for_program, programs)
-        else:
-            for program_info in programs:
-                self._init_chroma_collections_for_program(program_info)
-
     # Callback function that runs when the future is done to catch any exceptions
     def _analysis_done_callback(self, future: concurrent.futures.Future):
         try:
             future.result()
-            logging.info("Asynchronous analysis finished successfully.")
+            logger.info("Asynchronous analysis finished successfully.")
         except Exception as e:
-            logging.error(f"Asynchronous analysis failed with exception: {e}")
+            logger.error(f"Asynchronous analysis failed with exception: {e}")
             raise e
 
     def analyze_project(
@@ -750,9 +619,6 @@ class PyGhidraContext:
                 logger.info(f"Completed {completed_count}/{prog_count} programs")
 
         logger.info("All programs analyzed.")
-        # The chroma collections need to be initialized after analysis is complete
-        # At this point, threaded or not, all analysis is done
-        self._init_all_chroma_collections()  # DO NOT MOVE
 
     def analyze_program(  # noqa C901
         self,
@@ -827,7 +693,9 @@ class PyGhidraContext:
                     self.set_analysis_option(program, k, v)
 
             if self.no_symbols:
-                logger.warning(f"Disabling symbols for analysis! --no-symbols flag: {self.no_symbols}")
+                logger.warning(
+                    f"Disabling symbols for analysis! --no-symbols flag: {self.no_symbols}"
+                )
                 self.set_analysis_option(program, "PDB Universal", False)
 
             logger.info(f"Starting Ghidra analysis of {program}...")

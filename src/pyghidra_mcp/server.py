@@ -24,7 +24,6 @@ from pyghidra_mcp.models import (
     CallGraphDirection,
     CallGraphDisplayType,
     CallGraphResult,
-    CodeSearchResults,
     CrossReferenceInfos,
     DecompiledFunction,
     ExportInfos,
@@ -40,7 +39,11 @@ from pyghidra_mcp.tools import GhidraTools
 logger.remove()
 logger.add(
     sys.stderr,
-    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
+    format=(
+        "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+        "<level>{level: <8}</level> | "
+        "<level>{message}</level>"
+    ),
     level="INFO",
 )
 
@@ -163,39 +166,6 @@ def search_symbols_by_name(
 
 
 @mcp.tool()
-def search_code(binary_name: str, query: str, ctx: Context, limit: int = 5) -> CodeSearchResults:
-    """
-    Perform a semantic code search over a binarys decompiled pseudo C output
-    powered by a vector database for similarity matching.
-
-    This returns the most relevant functions or code blocks whose semantics
-    match the provided query even if the exact text differs. Results are
-    Ghidra generated pseudo C enabling natural language like exploration of
-    binary code structure.
-
-    For best results provide a short distinctive query such as a function
-    signature or key logic snippet to minimize irrelevant matches.
-
-    Args:
-        binary_name: Name of the binary to search within.
-        query: Code snippet signature or description to match via semantic search.
-        limit: Maximum number of top scoring results to return (default: 5).
-    """
-    try:
-        pyghidra_context = get_or_create_context()
-        program_info = pyghidra_context.get_program_info(binary_name)
-        tools = GhidraTools(program_info)
-        results = tools.search_code(query, limit)
-        return CodeSearchResults(results=results)
-    except Exception as e:
-        if isinstance(e, ValueError):
-            raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e))) from e
-        raise McpError(
-            ErrorData(code=INTERNAL_ERROR, message=f"Error searching for code: {e!s}")
-        ) from e
-
-
-@mcp.tool()
 def list_project_binaries(ctx: Context) -> ProgramInfos:
     """
     Retrieve binary name, path, and analysis status for every program (binary) currently
@@ -222,8 +192,6 @@ def list_project_binaries(ctx: Context) -> ProgramInfos:
                     load_time=pi.load_time,
                     analysis_complete=pi.analysis_complete,
                     metadata={},
-                    code_collection=pi.code_collection is not None,
-                    strings_collection=pi.strings_collection is not None,
                 )
             )
         return ProgramInfos(programs=program_infos)
@@ -585,14 +553,20 @@ def init_pyghidra_context(
     # These flags require immediate project access, which doesn't fit lazy mode
     if list_project_binaries or delete_project_binary:
         logger.warning(
-            "--list-project-binaries and --delete-project-binary "
-            "require immediate project access, which is not supported in lazy mode. "
+            "--list-project-binaries and --delete-project-binary require "
+            "immediate project access, which is not supported in lazy mode. "
             "Please start the server and use the tools instead."
         )
         if list_project_binaries:
-            click.echo("List binaries feature not available in lazy mode. Start server and use tools.")
+            click.echo(
+                "List binaries feature not available in lazy mode. "
+                "Start server and use tools."
+            )
         if delete_project_binary:
-            click.echo("Delete binary feature not available in lazy mode. Start server and use tools.")
+            click.echo(
+                "Delete binary feature not available in lazy mode. "
+                "Start server and use tools."
+            )
         sys.exit(1)
 
     logger.info("Server ready - Ghidra project will be created on first tool call")

@@ -15,7 +15,6 @@ from pyghidra_mcp.models import (
     CallGraphDirection,
     CallGraphDisplayType,
     CallGraphResult,
-    CodeSearchResult,
     CrossReferenceInfo,
     DecompiledFunction,
     ExportInfo,
@@ -368,67 +367,28 @@ class GhidraTools:
         return cross_references
 
     @handle_exceptions
-    def search_code(self, query: str, limit: int = 10) -> list[CodeSearchResult]:
-        """Searches the code in the binary for a given query."""
-        if not self.program_info.code_collection:
-            raise ValueError(
-                "Code indexing is not complete for this binary. Please try again later."
-            )
-
-        results = self.program_info.code_collection.query(query_texts=[query], n_results=limit)
-        search_results = []
-        if results and results["documents"]:
-            for i, doc in enumerate(results["documents"][0]):
-                metadata = results["metadatas"][0][i]  # type: ignore
-                distance = results["distances"][0][i]  # type: ignore
-                search_results.append(
-                    CodeSearchResult(
-                        function_name=str(metadata["function_name"]),
-                        code=doc,
-                        similarity=1 - distance,
-                    )
-                )
-        return search_results
-
-    @handle_exceptions
     def search_strings(self, query: str, limit: int = 100) -> list[StringSearchResult]:
-        """Searches for strings within a binary."""
+        """Searches for strings within a binary by direct filtering."""
+        if not query:
+            raise ValueError("Query string is required")
 
-        if not self.program_info.strings_collection:
-            raise ValueError(
-                "String indexing is not complete for this binary. Please try again later."
+        all_strings = self.get_all_strings()
+        query_lower = query.lower()
+
+        # Filter strings that contain the query (case-insensitive)
+        filtered_strings = [
+            s for s in all_strings
+            if query_lower in s.value.lower()
+        ][:limit]
+
+        return [
+            StringSearchResult(
+                value=s.value,
+                address=s.address,
+                similarity=1.0  # Exact match
             )
-
-        search_results = []
-        results = self.program_info.strings_collection.get(
-            where_document={"$contains": query}, limit=limit
-        )
-        if results and results["documents"]:
-            for i, doc in enumerate(results["documents"]):
-                metadata = results["metadatas"][i]  # type: ignore
-                search_results.append(
-                    StringSearchResult(
-                        value=doc,
-                        address=str(metadata["address"]),
-                        similarity=1,
-                    )
-                )
-            limit -= len(results["documents"])
-
-        results = self.program_info.strings_collection.query(query_texts=[query], n_results=limit)
-        if results and results["documents"]:
-            for i, doc in enumerate(results["documents"][0]):
-                metadata = results["metadatas"][0][i]  # type: ignore
-                distance = results["distances"][0][i]  # type: ignore
-                search_results.append(
-                    StringSearchResult(
-                        value=doc,
-                        address=str(metadata["address"]),
-                        similarity=1 - distance,
-                    )
-                )
-
-        return search_results
+            for s in filtered_strings
+        ]
 
     @handle_exceptions
     def read_bytes(self, address: str, size: int = 32) -> BytesReadResult:
