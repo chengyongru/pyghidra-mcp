@@ -1,15 +1,16 @@
 # Server
 # ---------------------------------------------------------------------------------
 import json
-import logging
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import click
 import pyghidra
 from click_option_group import optgroup
+from loguru import logger
 from mcp.server import Server
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.shared.exceptions import McpError
@@ -35,24 +36,72 @@ from pyghidra_mcp.models import (
 )
 from pyghidra_mcp.tools import GhidraTools
 
-logging.basicConfig(
-    level=logging.INFO,
-    stream=sys.stderr,  # Critical for STDIO transport
-    format="%(asctime)s [%(levelname)s] %(message)s",
+# Configure loguru to output to stderr (critical for STDIO transport)
+logger.remove()
+logger.add(
+    sys.stderr,
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
+    level="INFO",
 )
-logger = logging.getLogger(__name__)
+
+
+# Lazy Initialization
+# ---------------------------------------------------------------------------------
+
+# Global configuration for delayed context initialization
+_context_config: dict[str, Any] = {}
+_pyghidra_context: PyGhidraContext | None = None
+
+
+def get_or_create_context() -> PyGhidraContext:
+    """
+    Get or create the PyGhidraContext instance (lazy initialization).
+
+    This creates the context on first call, allowing multiple MCP server instances
+    to start without immediately contending for Ghidra project locks.
+    """
+    global _pyghidra_context
+
+    if _pyghidra_context is not None:
+        return _pyghidra_context
+
+    if not _context_config:
+        raise RuntimeError(
+            "Context not initialized. Call init_pyghidra_context() first."
+        )
+
+    config = _context_config
+    _pyghidra_context = PyGhidraContext(
+        project_name=config["project_name"],
+        project_path=config["project_directory"],
+        force_analysis=config.get("force_analysis", False),
+        verbose_analysis=config.get("verbose_analysis", False),
+        no_symbols=config.get("no_symbols", False),
+        gdts=config.get("gdts", []),
+        program_options=config.get("program_options"),
+        gzfs_path=config.get("gzfs_path"),
+        threaded=config.get("threaded", True),
+        max_workers=config.get("max_workers"),
+        wait_for_analysis=config.get("wait_for_analysis", False),
+    )
+
+    logger.info(f"PyGhidraContext created: {_pyghidra_context.project_name}")
+    return _pyghidra_context
 
 
 # Init Pyghidra
 # ---------------------------------------------------------------------------------
 @asynccontextmanager
 async def server_lifespan(server: Server) -> AsyncIterator[PyGhidraContext]:
-    """Manage server startup and shutdown lifecycle."""
+    """Manage server startup and shutdown lifecycle.
+
+    Context is created lazily on first tool call, not at server startup.
+    """
     try:
-        yield server._pyghidra_context  # type: ignore
+        yield None  # type: ignore
     finally:
-        # pyghidra_context.close()
-        pass
+        if _pyghidra_context is not None:
+            _pyghidra_context.close()
 
 
 mcp = FastMCP("pyghidra-mcp", lifespan=server_lifespan)  # type: ignore
@@ -71,7 +120,7 @@ async def decompile_function(
         name_or_address: The name or address of the function to decompile.
     """
     try:
-        pyghidra_context: PyGhidraContext = ctx.request_context.lifespan_context
+        pyghidra_context = get_or_create_context()
         program_info = pyghidra_context.get_program_info(binary_name)
         tools = GhidraTools(program_info)
         return tools.decompile_function_by_name_or_addr(name_or_address)
@@ -100,7 +149,7 @@ def search_symbols_by_name(
         limit: The maximum number of results to return.
     """
     try:
-        pyghidra_context: PyGhidraContext = ctx.request_context.lifespan_context
+        pyghidra_context = get_or_create_context()
         program_info = pyghidra_context.get_program_info(binary_name)
         tools = GhidraTools(program_info)
         symbols = tools.search_symbols_by_name(query, offset, limit)
@@ -133,7 +182,7 @@ def search_code(binary_name: str, query: str, ctx: Context, limit: int = 5) -> C
         limit: Maximum number of top scoring results to return (default: 5).
     """
     try:
-        pyghidra_context: PyGhidraContext = ctx.request_context.lifespan_context
+        pyghidra_context = get_or_create_context()
         program_info = pyghidra_context.get_program_info(binary_name)
         tools = GhidraTools(program_info)
         results = tools.search_code(query, limit)
@@ -163,7 +212,7 @@ def list_project_binaries(ctx: Context) -> ProgramInfos:
     code searches on specific programs.
     """
     try:
-        pyghidra_context: PyGhidraContext = ctx.request_context.lifespan_context
+        pyghidra_context = get_or_create_context()
         program_infos = []
         for name, pi in pyghidra_context.programs.items():
             program_infos.append(
@@ -207,7 +256,7 @@ def list_project_binary_metadata(binary_name: str, ctx: Context) -> BinaryMetada
         An object containing detailed metadata for the specified binary.
     """
     try:
-        pyghidra_context: PyGhidraContext = ctx.request_context.lifespan_context
+        pyghidra_context = get_or_create_context()
         program_info = pyghidra_context.get_program_info(binary_name)
         metadata_dict = program_info.metadata
         return BinaryMetadata.model_validate(metadata_dict)
@@ -230,7 +279,7 @@ async def delete_project_binary(binary_name: str, ctx: Context) -> str:
         binary_name: The name of the binary to delete.
     """
     try:
-        pyghidra_context: PyGhidraContext = ctx.request_context.lifespan_context
+        pyghidra_context = get_or_create_context()
         if pyghidra_context.delete_program(binary_name):
             return f"Successfully deleted binary: {binary_name}"
         else:
@@ -272,7 +321,7 @@ def list_exports(
         limit: Maximum number of results to return.
     """
     try:
-        pyghidra_context: PyGhidraContext = ctx.request_context.lifespan_context
+        pyghidra_context = get_or_create_context()
         program_info = pyghidra_context.get_program_info(binary_name)
         tools = GhidraTools(program_info)
         exports = tools.list_exports(query=query, offset=offset, limit=limit)
@@ -311,7 +360,7 @@ def list_imports(
         limit: Maximum number of results to return.
     """
     try:
-        pyghidra_context: PyGhidraContext = ctx.request_context.lifespan_context
+        pyghidra_context = get_or_create_context()
         program_info = pyghidra_context.get_program_info(binary_name)
         tools = GhidraTools(program_info)
         imports = tools.list_imports(query=query, offset=offset, limit=limit)
@@ -339,7 +388,7 @@ def list_cross_references(
         to find cross-references to.
     """
     try:
-        pyghidra_context: PyGhidraContext = ctx.request_context.lifespan_context
+        pyghidra_context = get_or_create_context()
         program_info = pyghidra_context.get_program_info(binary_name)
         tools = GhidraTools(program_info)
         cross_references = tools.list_cross_references(name_or_address)
@@ -368,7 +417,7 @@ def search_strings(
         limit: The maximum number of results to return.
     """
     try:
-        pyghidra_context: PyGhidraContext = ctx.request_context.lifespan_context
+        pyghidra_context = get_or_create_context()
         program_info = pyghidra_context.get_program_info(binary_name)
         tools = GhidraTools(program_info)
         strings = tools.search_strings(query=query, limit=limit)
@@ -391,7 +440,7 @@ def read_bytes(binary_name: str, ctx: Context, address: str, size: int = 32) -> 
         size: The number of bytes to read (default: 32, max: 8192).
     """
     try:
-        pyghidra_context: PyGhidraContext = ctx.request_context.lifespan_context
+        pyghidra_context = get_or_create_context()
         program_info = pyghidra_context.get_program_info(binary_name)
         tools = GhidraTools(program_info)
         return tools.read_bytes(address=address, size=size)
@@ -429,7 +478,7 @@ def gen_callgraph(
         bottom_layers: Number of bottom layers to show in a condensed graph.
     """
     try:
-        pyghidra_context: PyGhidraContext = ctx.request_context.lifespan_context
+        pyghidra_context = get_or_create_context()
         program_info = pyghidra_context.get_program_info(binary_name)
         tools = GhidraTools(program_info)
         return tools.gen_callgraph(
@@ -461,7 +510,7 @@ def import_binary(binary_path: str, ctx: Context) -> str:
     try:
         # We would like to do context progress updates, but until that is more
         # widely supported by clients, we will resort to this
-        pyghidra_context: PyGhidraContext = ctx.request_context.lifespan_context
+        pyghidra_context = get_or_create_context()
         pyghidra_context.import_binary_backgrounded(binary_path)
         return (
             f"Importing {binary_path} in the background."
@@ -492,68 +541,61 @@ def init_pyghidra_context(
     list_project_binaries: bool,
     delete_project_binary: str | None,
 ) -> FastMCP:
-    bin_paths: list[str | Path] = [Path(p) for p in input_paths]
-    logger.info(f"Project: {project_name}")
-    logger.info(f"Project: Location {project_directory}")
+    """
+    Lightweight initialization that stores configuration without creating a Ghidra project.
+
+    The actual Ghidra project is created lazily on the first tool call via get_or_create_context().
+    This allows multiple MCP server instances to start without lock contention.
+    """
+    global _context_config
+
+    logger.info("Server initializing (lazy mode - project created on first tool call)...")
 
     program_options: dict | None = None
     if program_options_path:
         with open(program_options_path) as f:
             program_options = json.load(f)
 
-    # init pyghidra
-    pyghidra.start(False)  # setting Verbose output
+    # Store configuration for lazy initialization
+    _context_config = {
+        "project_name": project_name,
+        "project_directory": project_directory,
+        "force_analysis": force_analysis,
+        "verbose_analysis": verbose_analysis,
+        "no_symbols": no_symbols,
+        "gdts": gdts,
+        "program_options": program_options,
+        "gzfs_path": gzfs_path,
+        "threaded": threaded,
+        "max_workers": max_workers,
+        "wait_for_analysis": wait_for_analysis,
+    }
 
-    # init PyGhidraContext / import + analyze binaries
-    logger.info("Server initializing...")
-    pyghidra_context = PyGhidraContext(
-        project_name=project_name,
-        project_path=project_directory,
-        force_analysis=force_analysis,
-        verbose_analysis=verbose_analysis,
-        no_symbols=no_symbols,
-        gdts=gdts,
-        program_options=program_options,
-        gzfs_path=gzfs_path,
-        threaded=threaded,
-        max_workers=max_workers,
-        wait_for_analysis=wait_for_analysis,
-    )
+    # Only initialize pyghidra itself, don't create a project yet
+    pyghidra.start(False)  # Disable verbose output
 
-    if list_project_binaries:
-        binaries = pyghidra_context.list_binaries()
-        if binaries:
-            click.echo("Ghidra Project Binaries:")
-            for binary_name in binaries:
-                click.echo(f"- {binary_name}")
-        else:
-            click.echo("No binaries found in the project.")
-        sys.exit(0)
+    # Note: input_paths are ignored in server mode - use import_binary tool instead
+    if input_paths:
+        logger.info(
+            f"Note: input_paths provided ({len(input_paths)} files) "
+            "but will not be imported automatically. "
+            "Use the import_binary tool instead."
+        )
 
-    if delete_project_binary:
-        try:
-            if pyghidra_context.delete_program(delete_project_binary):
-                click.echo(f"Successfully deleted binary: {delete_project_binary}")
-            else:
-                click.echo(f"Failed to delete binary: {delete_project_binary}", err=True)
-        except ValueError as e:
-            click.echo(f"Error: {e}", err=True)
-        sys.exit(0)
+    # These flags require immediate project access, which doesn't fit lazy mode
+    if list_project_binaries or delete_project_binary:
+        logger.warning(
+            "--list-project-binaries and --delete-project-binary "
+            "require immediate project access, which is not supported in lazy mode. "
+            "Please start the server and use the tools instead."
+        )
+        if list_project_binaries:
+            click.echo("List binaries feature not available in lazy mode. Start server and use tools.")
+        if delete_project_binary:
+            click.echo("Delete binary feature not available in lazy mode. Start server and use tools.")
+        sys.exit(1)
 
-    if len(bin_paths) > 0:
-        logger.info(f"Adding new bins: {', '.join(map(str, bin_paths))}")
-        logger.info(f"Importing binaries to {project_directory}")
-        pyghidra_context.import_binaries(bin_paths)
-
-    logger.info(f"Analyzing project: {pyghidra_context.project}")
-    pyghidra_context.analyze_project()
-
-    if len(pyghidra_context.list_binaries()) == 0:
-        logger.warning("No binaries were imported and none exist in the project.")
-
-    mcp._pyghidra_context = pyghidra_context  # type: ignore
-    logger.info("Server intialized")
-
+    logger.info("Server ready - Ghidra project will be created on first tool call")
     return mcp
 
 
@@ -721,18 +763,18 @@ def main(
         delete_project_binary=delete_project_binary,
     )
 
-    try:
-        if transport == "stdio":
-            mcp.run(transport="stdio")
-        elif transport in ["streamable-http", "http"]:
-            mcp.run(transport="streamable-http")
-        elif transport == "sse":
-            mcp.run(transport="sse")
-        else:
-            raise ValueError(f"Invalid transport: {transport}")
-    finally:
-        mcp._pyghidra_context.close()  # type: ignore
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+    elif transport in ["streamable-http", "http"]:
+        mcp.run(transport="streamable-http")
+    elif transport == "sse":
+        mcp.run(transport="sse")
+    else:
+        raise ValueError(f"Invalid transport: {transport}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.error(f"Unknown error occured: {e}")
