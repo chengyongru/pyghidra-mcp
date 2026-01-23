@@ -3,12 +3,12 @@ Comprehensive tool implementations for pyghidra-mcp.
 """
 
 import functools
-import logging
 import re
 import typing
 
 from ghidrecomp.callgraph import gen_callgraph
 from jpype import JByte
+from loguru import logger
 
 from pyghidra_mcp.models import (
     BytesReadResult,
@@ -31,8 +31,6 @@ if typing.TYPE_CHECKING:
     from ghidra.program.model.symbol import Symbol
 
     from .context import ProgramInfo
-
-logger = logging.getLogger(__name__)
 
 
 def handle_exceptions(func):

@@ -1,7 +1,6 @@
 import concurrent.futures
 import hashlib
 import json
-import logging
 import multiprocessing
 import time
 from dataclasses import dataclass
@@ -11,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Union
 import chromadb
 import pyghidra  # noqa
 from chromadb.config import Settings
+from loguru import logger
 
 from pyghidra_mcp.tools import GhidraTools
 
@@ -20,10 +20,6 @@ if TYPE_CHECKING:
     from ghidra.framework.model import DomainFile
     from ghidra.program.flatapi import FlatProgramAPI
     from ghidra.program.model.listing import Program
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -120,7 +116,7 @@ class PyGhidraContext:
         self.max_workers = max_workers if max_workers else cpu_count
 
         if not self.threaded:
-            logger.warn("--no-threaded flag forcing max_workers to 1")
+            logger.warning("--no-threaded flag forcing max_workers to 1")
             self.max_workers = 1
         self.executor = (
             concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers)
@@ -133,19 +129,21 @@ class PyGhidraContext:
         self.wait_for_analysis = wait_for_analysis
 
     def close(self, save: bool = True):
-        """
-        Saves changes to all open programs and closes the project.
-        """
-        for _program_name, program_info in self.programs.items():
-            program = program_info.program
-            self.project.close(program)
+        """Saves changes to all open programs and closes the project."""
+        # Shutdown thread pools FIRST before closing programs
+        # Background tasks may still need to access programs/project
+        if self.import_executor:
+            self.import_executor.shutdown(wait=True)
 
         if self.executor:
             self.executor.shutdown(wait=True)
 
-        if self.import_executor:
-            self.import_executor.shutdown(wait=True)
+        # Now safe to close all programs
+        for _program_name, program_info in self.programs.items():
+            program = program_info.program
+            self.project.close(program)
 
+        # Close the Ghidra project
         self.project.close()
         logger.info(f"Project {self.project_name} closed.")
 
@@ -575,7 +573,7 @@ class PyGhidraContext:
             collection = self.chroma_client.get_collection(name=program_info.name)
             logger.info(f"Collection '{program_info.name}' exists; skipping code ingest.")
             program_info.code_collection = collection
-        except Exception:
+        except Exception as e:
             logger.info(f"Creating new code collection '{program_info.name}'")
             tools = GhidraTools(program_info)
             functions = tools.get_all_functions()
@@ -829,7 +827,7 @@ class PyGhidraContext:
                     self.set_analysis_option(program, k, v)
 
             if self.no_symbols:
-                logger.warn(f"Disabling symbols for analysis! --no-symbols flag: {self.no_symbols}")
+                logger.warning(f"Disabling symbols for analysis! --no-symbols flag: {self.no_symbols}")
                 self.set_analysis_option(program, "PDB Universal", False)
 
             logger.info(f"Starting Ghidra analysis of {program}...")
