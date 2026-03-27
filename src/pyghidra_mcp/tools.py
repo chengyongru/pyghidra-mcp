@@ -447,7 +447,9 @@ class GhidraTools:
         """Get the image base address of the loaded program."""
         min_addr = self.program.getMinAddress()
         if min_addr is None:
-            raise ValueError("Unable to determine image base - program has no address ranges")
+            raise ToolResultError(
+                "Unable to determine image base - program has no address ranges"
+            )
         return str(min_addr)
 
     @handle_exceptions
@@ -457,10 +459,10 @@ class GhidraTools:
             max_read_size = 8192
 
             if size <= 0:
-                raise ValueError("size must be > 0")
+                raise ToolResultError("size must be > 0")
 
             if size > max_read_size:
-                raise ValueError(f"Size {size} exceeds maximum {max_read_size}")
+                raise ToolResultError(f"Size {size} exceeds maximum {max_read_size}")
 
             af = self.program.getAddressFactory()
 
@@ -471,13 +473,15 @@ class GhidraTools:
 
                 addr = af.getAddress(addr_str)
                 if addr is None:
-                    raise ValueError(f"Invalid address: {address}")
+                    raise ToolResultError(f"Invalid address: {address}")
+            except ToolResultError:
+                raise
             except Exception as e:
-                raise ValueError(f"Invalid address format '{address}': {e}") from e
+                raise ToolResultError(f"Invalid address format '{address}': {e}") from e
 
             mem = self.program.getMemory()
             if not mem.contains(addr):
-                raise ValueError(f"Address {address} is not in mapped memory")
+                raise ToolResultError(f"Address {address} is not in mapped memory")
 
             # Use JPype to handle byte arrays properly for PyGhidra
             # Create Java byte array - JPype's runtime magic confuses static type checkers

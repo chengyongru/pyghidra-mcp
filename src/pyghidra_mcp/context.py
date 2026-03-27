@@ -188,6 +188,7 @@ class PyGhidraContext:
                         # Use DecompDisposer for background thread disposal
                         # This prevents deadlocks on synchronized methods
                         from ghidra.app.decompiler import DecompDisposer
+
                         DecompDisposer.dispose(program_info.decompiler)
                         logger.debug(f"Disposed decompiler for {program_name}")
                     except Exception as e:
@@ -257,8 +258,7 @@ class PyGhidraContext:
 
                 # List lock files for diagnostic info
                 lock_files = [
-                    f for pattern in self._LOCK_FILE_PATTERNS
-                    for f in project_dir.glob(pattern)
+                    f for pattern in self._LOCK_FILE_PATTERNS for f in project_dir.glob(pattern)
                 ]
                 logger.warning(
                     f"Project locked. Found {len(lock_files)} lock file(s): "
@@ -313,18 +313,16 @@ class PyGhidraContext:
         for binary_path_s in all_binary_paths:
             # Get the parent folder path and filename from Ghidra pathname
             # Ghidra pathnames use '/' as separator and are relative to project root
-            if '/' in binary_path_s:
-                folder_path, program_name = binary_path_s.rsplit('/', 1)
+            if "/" in binary_path_s:
+                folder_path, program_name = binary_path_s.rsplit("/", 1)
                 # Ensure folder_path starts with '/' for absolute path within project
-                if not folder_path.startswith('/'):
-                    folder_path = '/' + folder_path
+                if not folder_path.startswith("/"):
+                    folder_path = "/" + folder_path
             else:
-                folder_path = '/'
+                folder_path = "/"
                 program_name = binary_path_s
 
-            program: Program = self.project.openProgram(
-                folder_path, program_name, False
-            )
+            program: Program = self.project.openProgram(folder_path, program_name, False)
             program_info = self._init_program_info(program)
             self.programs[binary_path_s] = program_info
 
@@ -406,6 +404,7 @@ class PyGhidraContext:
 
                     # Use DecompDisposer for background thread disposal
                     from ghidra.app.decompiler import DecompDisposer
+
                     DecompDisposer.dispose(program_info.decompiler)
                     logger.debug(f"Disposed decompiler for {program_name}")
                 except Exception as e:
@@ -600,7 +599,9 @@ class PyGhidraContext:
             self.import_binary(binary_path, analyze=True)
 
     def get_program_info(self, binary_name: str) -> "ProgramInfo":
-        """Get program info or raise ValueError if not found."""
+        """Get program info or raise ToolResultError if not found or analysis incomplete."""
+        from pyghidra_mcp.tools import ToolResultError
+
         program_info = self.programs.get(binary_name)
         if program_info is None:
             for pi in self.programs.values():
@@ -610,17 +611,19 @@ class PyGhidraContext:
 
             if program_info is None:
                 available_progs = [pi.name for pi in self.programs.values()]
-                raise ValueError(
-                    f"Binary {binary_name} not found. Available binaries: {available_progs}"
+                raise ToolResultError(
+                    f"Binary '{binary_name}' not found.",
+                    suggestions=available_progs,
                 )
 
         # Use thread-safe property access
         if not program_info.analysis_complete:
-            raise RuntimeError(
+            raise ToolResultError(
                 f"Analysis incomplete for binary '{binary_name}'. "
                 f"Ghidra analysis: {program_info.ghidra_analysis_complete}. "
                 "Wait and try tool call again."
             )
+
         return program_info
 
     def _init_program_info(self, program):

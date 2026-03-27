@@ -245,7 +245,7 @@ async def decompile_function(
 @mcp.tool()
 def search_symbols_by_name(
     binary_name: str, query: str, ctx: Context, offset: int = 0, limit: int = 25
-) -> SymbolSearchResults:
+) -> SymbolSearchResults | ToolError:
     """Searches for symbols, including functions, within a binary by name.
 
     This tool searches for symbols by a case-insensitive substring. Symbols include
@@ -265,9 +265,9 @@ def search_symbols_by_name(
         tools = GhidraTools(program_info)
         symbols = tools.search_symbols_by_name(query, offset, limit)
         return SymbolSearchResults(symbols=symbols)
+    except ToolResultError as e:
+        return ToolError(error=e.message, suggestions=e.suggestions)
     except Exception as e:
-        if isinstance(e, ValueError):
-            raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e))) from e
         raise McpError(
             ErrorData(code=INTERNAL_ERROR, message=f"Error searching for symbols: {e!s}")
         ) from e
@@ -316,7 +316,9 @@ def list_project_binaries(ctx: Context) -> ProgramInfos:
 
 
 @mcp.tool()
-def list_project_binary_metadata(binary_name: str, ctx: Context) -> BinaryMetadata:
+def list_project_binary_metadata(
+    binary_name: str, ctx: Context
+) -> BinaryMetadata | ToolError:
     """
     Retrieve detailed metadata for a specific program (binary) in the active project.
 
@@ -340,9 +342,9 @@ def list_project_binary_metadata(binary_name: str, ctx: Context) -> BinaryMetada
         program_info = pyghidra_context.get_program_info(binary_name)
         metadata_dict = program_info.metadata
         return BinaryMetadata.model_validate(metadata_dict)
+    except ToolResultError as e:
+        return ToolError(error=e.message, suggestions=e.suggestions)
     except Exception as e:
-        if isinstance(e, ValueError):
-            raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e))) from e
         raise McpError(
             ErrorData(
                 code=INTERNAL_ERROR,
@@ -383,7 +385,7 @@ def list_exports(
     query: str = ".*",
     offset: int = 0,
     limit: int = 25,
-) -> ExportInfos:
+) -> ExportInfos | ToolError:
     """
     Retrieve exported functions and symbols from a given binary,
     with optional regex filtering to focus on only the most relevant items.
@@ -408,9 +410,9 @@ def list_exports(
         tools = GhidraTools(program_info)
         exports = tools.list_exports(query=query, offset=offset, limit=limit)
         return ExportInfos(exports=exports)
+    except ToolResultError as e:
+        return ToolError(error=e.message, suggestions=e.suggestions)
     except Exception as e:
-        if isinstance(e, ValueError):
-            raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e))) from e
         raise McpError(
             ErrorData(code=INTERNAL_ERROR, message=f"Error listing exports: {e!s}")
         ) from e
@@ -423,7 +425,7 @@ def list_imports(
     query: str = ".*",
     offset: int = 0,
     limit: int = 25,
-) -> ImportInfos:
+) -> ImportInfos | ToolError:
     """
     Retrieve imported functions and symbols from a given binary,
     with optional filtering to return only the most relevant matches.
@@ -448,9 +450,9 @@ def list_imports(
         tools = GhidraTools(program_info)
         imports = tools.list_imports(query=query, offset=offset, limit=limit)
         return ImportInfos(imports=imports)
+    except ToolResultError as e:
+        return ToolError(error=e.message, suggestions=e.suggestions)
     except Exception as e:
-        if isinstance(e, ValueError):
-            raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e))) from e
         raise McpError(
             ErrorData(code=INTERNAL_ERROR, message=f"Error listing imports: {e!s}")
         ) from e
@@ -491,7 +493,7 @@ def search_strings(
     ctx: Context,
     query: str,
     limit: int = 100,
-) -> StringSearchResults:
+) -> StringSearchResults | ToolError:
     """Searches for strings within a binary by name.
     This can be very useful to gain general understanding of behaviors.
 
@@ -507,16 +509,16 @@ def search_strings(
         tools = GhidraTools(program_info)
         strings = tools.search_strings(query=query, limit=limit)
         return StringSearchResults(strings=strings)
+    except ToolResultError as e:
+        return ToolError(error=e.message, suggestions=e.suggestions)
     except Exception as e:
-        if isinstance(e, ValueError):
-            raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e))) from e
         raise McpError(
             ErrorData(code=INTERNAL_ERROR, message=f"Error searching for strings: {e!s}")
         ) from e
 
 
 @mcp.tool()
-def get_image_base(binary_name: str, ctx: Context) -> ImageBaseResult:
+def get_image_base(binary_name: str, ctx: Context) -> ImageBaseResult | ToolError:
     """Get the image base address of a binary.
 
     Args:
@@ -529,8 +531,8 @@ def get_image_base(binary_name: str, ctx: Context) -> ImageBaseResult:
         tools = GhidraTools(program_info)
         image_base = tools.get_image_base()
         return ImageBaseResult(image_base=image_base)
-    except ValueError as e:
-        raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e))) from e
+    except ToolResultError as e:
+        return ToolError(error=e.message, suggestions=e.suggestions)
     except Exception as e:
         raise McpError(
             ErrorData(code=INTERNAL_ERROR, message=f"Error getting image base: {e!s}")
@@ -538,7 +540,9 @@ def get_image_base(binary_name: str, ctx: Context) -> ImageBaseResult:
 
 
 @mcp.tool()
-def read_bytes(binary_name: str, ctx: Context, address: str, size: int = 32) -> BytesReadResult:
+def read_bytes(
+    binary_name: str, ctx: Context, address: str, size: int = 32
+) -> BytesReadResult | ToolError:
     """Reads raw bytes from memory at a specified address.
 
     Args:
@@ -552,10 +556,12 @@ def read_bytes(binary_name: str, ctx: Context, address: str, size: int = 32) -> 
         program_info = pyghidra_context.get_program_info(binary_name)
         tools = GhidraTools(program_info)
         return tools.read_bytes(address=address, size=size)
-    except ValueError as e:
-        raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e))) from e
+    except ToolResultError as e:
+        return ToolError(error=e.message, suggestions=e.suggestions)
     except Exception as e:
-        raise McpError(ErrorData(code=INTERNAL_ERROR, message=f"Error reading bytes: {e!s}")) from e
+        raise McpError(
+            ErrorData(code=INTERNAL_ERROR, message=f"Error reading bytes: {e!s}")
+        ) from e
 
 
 @mcp.tool()
@@ -610,7 +616,7 @@ def gen_callgraph(
 
 
 @mcp.tool()
-def import_binary(binary_path: str, ctx: Context) -> str:
+def import_binary(binary_path: str, ctx: Context) -> str | ToolError:
     """Imports a binary from a designated path into the current Ghidra project.
 
     Args:
@@ -626,9 +632,9 @@ def import_binary(binary_path: str, ctx: Context) -> str:
             f"Importing {binary_path} in the background."
             "When ready, it will appear analyzed in binary list."
         )
+    except ToolResultError as e:
+        return ToolError(error=e.message, suggestions=e.suggestions)
     except Exception as e:
-        if isinstance(e, ValueError):
-            raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e))) from e
         raise McpError(
             ErrorData(code=INTERNAL_ERROR, message=f"Error importing binary: {e!s}")
         ) from e
