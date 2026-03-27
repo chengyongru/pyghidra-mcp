@@ -37,8 +37,9 @@ from pyghidra_mcp.models import (
     ProgramInfos,
     StringSearchResults,
     SymbolSearchResults,
+    ToolError,
 )
-from pyghidra_mcp.tools import GhidraTools
+from pyghidra_mcp.tools import GhidraTools, ToolResultError
 
 # Configure loguru to output to stderr (critical for STDIO transport)
 # Use enqueue=True to prevent blocking in multi-threaded scenarios (e.g., with debuggers)
@@ -91,9 +92,7 @@ def get_or_create_context() -> PyGhidraContext:
             return _pyghidra_context
 
         if not _context_config:
-            raise RuntimeError(
-                "Context not initialized. Call init_pyghidra_context() first."
-            )
+            raise RuntimeError("Context not initialized. Call init_pyghidra_context() first.")
 
         config = _context_config
         _pyghidra_context = PyGhidraContext(
@@ -142,8 +141,9 @@ async def server_lifespan(server: Server) -> AsyncIterator[PyGhidraContext]:
                 logger.info("Shutting down Ghidra JVM...")
                 try:
                     import jpype
+
                     if jpype.isJVMStarted():
-                        if hasattr(_pyghidra_launcher, 'stop'):
+                        if hasattr(_pyghidra_launcher, "stop"):
                             _pyghidra_launcher.stop()
                         # Shutdown JVM
                         jpype.shutdownJVM()
@@ -174,8 +174,9 @@ async def cleanup_jvm_http() -> None:
     if _pyghidra_launcher is not None:
         try:
             import jpype
+
             if jpype.isJVMStarted():
-                if hasattr(_pyghidra_launcher, 'stop'):
+                if hasattr(_pyghidra_launcher, "stop"):
                     _pyghidra_launcher.stop()
                 jpype.shutdownJVM()
                 logger.info("Ghidra JVM terminated successfully")
@@ -197,6 +198,7 @@ def cleanup_jvm_atexit() -> None:
     # Run async cleanup in new event loop if needed
     try:
         import asyncio
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(cleanup_jvm_http())
@@ -207,7 +209,6 @@ def cleanup_jvm_atexit() -> None:
 
 # Register atexit handler for SSE/HTTP modes
 import atexit
-
 
 atexit.register(cleanup_jvm_atexit)
 
@@ -220,7 +221,7 @@ mcp = FastMCP("pyghidra-mcp", lifespan=server_lifespan)  # type: ignore
 @mcp.tool()
 async def decompile_function(
     binary_name: str, name_or_address: str, ctx: Context
-) -> DecompiledFunction:
+) -> DecompiledFunction | ToolError:
     """Decompiles a function in the currently loaded program and returns its pseudo-C code.
 
     Args:
@@ -233,9 +234,9 @@ async def decompile_function(
         program_info = pyghidra_context.get_program_info(binary_name)
         tools = GhidraTools(program_info)
         return tools.decompile_function_by_name_or_addr(name_or_address)
+    except ToolResultError as e:
+        return ToolError(error=e.message, suggestions=e.suggestions)
     except Exception as e:
-        if isinstance(e, ValueError):
-            raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e))) from e
         raise McpError(
             ErrorData(code=INTERNAL_ERROR, message=f"Error decompiling function: {e!s}")
         ) from e
@@ -458,7 +459,7 @@ def list_imports(
 @mcp.tool()
 def list_cross_references(
     binary_name: str, name_or_address: str, ctx: Context
-) -> CrossReferenceInfos:
+) -> CrossReferenceInfos | ToolError:
     """Finds and lists all cross-references (x-refs) to a given function, symbol, or address within
     a binary. This is crucial for understanding how code and data are used and related.
     If an exact match for a function or symbol is not found,
@@ -476,9 +477,9 @@ def list_cross_references(
         tools = GhidraTools(program_info)
         cross_references = tools.list_cross_references(name_or_address)
         return CrossReferenceInfos(cross_references=cross_references)
+    except ToolResultError as e:
+        return ToolError(error=e.message, suggestions=e.suggestions)
     except Exception as e:
-        if isinstance(e, ValueError):
-            raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e))) from e
         raise McpError(
             ErrorData(code=INTERNAL_ERROR, message=f"Error listing cross-references: {e!s}")
         ) from e
@@ -531,7 +532,9 @@ def get_image_base(binary_name: str, ctx: Context) -> ImageBaseResult:
     except ValueError as e:
         raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e))) from e
     except Exception as e:
-        raise McpError(ErrorData(code=INTERNAL_ERROR, message=f"Error getting image base: {e!s}")) from e
+        raise McpError(
+            ErrorData(code=INTERNAL_ERROR, message=f"Error getting image base: {e!s}")
+        ) from e
 
 
 @mcp.tool()
@@ -565,7 +568,7 @@ def gen_callgraph(
     condense_threshold: int = 50,
     top_layers: int = 3,
     bottom_layers: int = 3,
-) -> CallGraphResult:
+) -> CallGraphResult | ToolError:
     """Generates a mermaidjs function call graph for a specified function.
 
     Typically the 'calling' callgraph is most useful.
@@ -598,9 +601,9 @@ def gen_callgraph(
             top_layers=top_layers,
             bottom_layers=bottom_layers,
         )
+    except ToolResultError as e:
+        return ToolError(error=e.message, suggestions=e.suggestions)
     except Exception as e:
-        if isinstance(e, ValueError):
-            raise McpError(ErrorData(code=INVALID_PARAMS, message=str(e))) from e
         raise McpError(
             ErrorData(code=INTERNAL_ERROR, message=f"Error generating call graph: {e!s}")
         ) from e
@@ -700,7 +703,7 @@ def init_pyghidra_context(
         # Following PyGhidra documentation pattern: launcher = api.start()
         _pyghidra_launcher = pyghidra.start(False)  # Disable verbose output
         logger.info("Ghidra JVM started successfully")
-    except Exception as e:
+    except Exception:
         raise
     finally:
         # Always restore original stdout and close the duplicated fd
@@ -727,13 +730,11 @@ def init_pyghidra_context(
         )
         if list_project_binaries:
             click.echo(
-                "List binaries feature not available in lazy mode. "
-                "Start server and use tools."
+                "List binaries feature not available in lazy mode. Start server and use tools."
             )
         if delete_project_binary:
             click.echo(
-                "Delete binary feature not available in lazy mode. "
-                "Start server and use tools."
+                "Delete binary feature not available in lazy mode. Start server and use tools."
             )
         sys.exit(1)
 

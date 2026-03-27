@@ -32,6 +32,20 @@ if typing.TYPE_CHECKING:
     from .context import ProgramInfo
 
 
+class ToolResultError(Exception):
+    """Exception for user-facing tool errors that should be returned as results, not thrown.
+
+    Carries structured error information (message + suggestions) that the server
+    layer converts to a ToolError result model. This avoids exception propagation
+    to MCP clients and allows LLM consumers to self-correct.
+    """
+
+    def __init__(self, message: str, suggestions: list[str] | None = None):
+        self.message = message
+        self.suggestions = suggestions or []
+        super().__init__(message)
+
+
 def handle_exceptions(func):
     """Decorator to handle exceptions in tool methods"""
 
@@ -39,6 +53,8 @@ def handle_exceptions(func):
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
+        except ToolResultError:
+            raise  # Don't log user-facing errors
         except Exception as e:
             logger.error(f"Error in {func.__name__}: {e!s}")
             raise
@@ -118,9 +134,9 @@ class GhidraTools:
                 f"{f.getSymbol().getName(True)}({f.getSignature()}) @ {f.getEntryPoint()}"
                 for f in exact_matches
             ]
-            raise ValueError(
-                f"Ambiguous match for '{name_or_address}'. Did you mean one of these: "
-                + ", ".join(suggestions)
+            raise ToolResultError(
+                f"Ambiguous match for '{name_or_address}'.",
+                suggestions=suggestions,
             )
 
         # No exact matches → suggest partials
@@ -131,12 +147,12 @@ class GhidraTools:
             suggestions = [
                 f"{f.getSymbol().getName(True)} @ {f.getEntryPoint()}" for f in partial_matches
             ]
-            raise ValueError(
-                f"Function '{name_or_address}' not found. Did you mean one of these: "
-                + ", ".join(suggestions)
+            raise ToolResultError(
+                f"Function '{name_or_address}' not found.",
+                suggestions=suggestions,
             )
 
-        raise ValueError(f"Function or symbol '{name_or_address}' not found.")
+        raise ToolResultError(f"Function or symbol '{name_or_address}' not found.")
 
     def _lookup_symbols(
         self,
@@ -205,12 +221,12 @@ class GhidraTools:
             return matches[0]
         elif len(matches) > 1:
             suggestions = [f"{s.getName(True)} @ {s.getAddress()}" for s in matches]
-            raise ValueError(
-                f"Ambiguous match for '{name_or_address}'. Did you mean one of these: "
-                + ", ".join(suggestions)
+            raise ToolResultError(
+                f"Ambiguous match for '{name_or_address}'.",
+                suggestions=suggestions,
             )
         else:
-            raise ValueError(f"Symbol '{name_or_address}' not found.")
+            raise ToolResultError(f"Symbol '{name_or_address}' not found.")
 
     @handle_exceptions
     def decompile_function_by_name_or_addr(
@@ -304,9 +320,13 @@ class GhidraTools:
             for data in data_iterator:
                 try:
                     string_value = data.getValue()
-                    strings.append(StringInfo(value=str(string_value), address=str(data.getAddress())))
+                    strings.append(
+                        StringInfo(value=str(string_value), address=str(data.getAddress()))
+                    )
                 except Exception as e:
-                    logger.debug(f"Could not get string value from data at {data.getAddress()}: {e}")
+                    logger.debug(
+                        f"Could not get string value from data at {data.getAddress()}: {e}"
+                    )
 
             return strings
 
@@ -352,7 +372,9 @@ class GhidraTools:
                 if symbol.isExternalEntryPoint():
                     if query and not re.search(query, symbol.getName(), re.IGNORECASE):
                         continue
-                    exports.append(ExportInfo(name=symbol.getName(), address=str(symbol.getAddress())))
+                    exports.append(
+                        ExportInfo(name=symbol.getName(), address=str(symbol.getAddress()))
+                    )
             return exports[offset : limit + offset]
 
     @handle_exceptions
@@ -409,16 +431,13 @@ class GhidraTools:
         query_lower = query.lower()
 
         # Filter strings that contain the query (case-insensitive)
-        filtered_strings = [
-            s for s in all_strings
-            if query_lower in s.value.lower()
-        ][:limit]
+        filtered_strings = [s for s in all_strings if query_lower in s.value.lower()][:limit]
 
         return [
             StringSearchResult(
                 value=s.value,
                 address=s.address,
-                similarity=1.0  # Exact match
+                similarity=1.0,  # Exact match
             )
             for s in filtered_strings
         ]

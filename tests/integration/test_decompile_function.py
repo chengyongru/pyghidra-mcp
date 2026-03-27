@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
@@ -36,3 +38,29 @@ async def test_decompile_function_tool(shared_mcp_session):
         # or because of issues with the binary analysis
         # We'll just check that we got a proper error response
         assert e is not None
+
+
+@pytest.mark.asyncio
+async def test_decompile_function_not_found_returns_tool_error(shared_mcp_session):
+    """Test that decompile_function returns a ToolError result (not an exception)
+    when the function is not found."""
+
+    session = shared_mcp_session
+    binary_name = session.demo_binary_name
+
+    # Call with a non-existent function name — should NOT raise
+    results = await session.call_tool(
+        "decompile_function",
+        {"binary_name": binary_name, "name_or_address": "nonexistent_function_xyz"},
+    )
+
+    # Should return a normal result (not raise), containing ToolError data
+    assert results is not None
+    assert results.content is not None
+    assert len(results.content) > 0
+    assert results.isError is False  # MCP-level error flag should be False
+
+    # Parse the result as JSON and verify ToolError fields
+    data = json.loads(results.content[0].text)
+    assert "error" in data
+    assert "nonexistent_function_xyz" in data["error"]

@@ -3,6 +3,21 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 
+class ToolError(BaseModel):
+    """Error result from a tool call.
+
+    Returned when a user-facing error occurs (e.g., function not found)
+    instead of raising an exception. This allows LLM consumers to see
+    the error as a normal result and self-correct without exception propagation.
+    """
+
+    error: str = Field(..., description="Error message describing what went wrong")
+    suggestions: list[str] = Field(
+        default_factory=list,
+        description="Suggested alternatives that the caller can try",
+    )
+
+
 class DecompiledFunction(BaseModel):
     """Represents a single function decompiled by Ghidra."""
 
@@ -98,12 +113,8 @@ class SymbolInfo(BaseModel):
 
     name: str = Field(..., description="The name of the symbol.")
     address: str = Field(..., description="The address of the symbol.")
-    type: str = Field(
-        ..., description="Symbol type (e.g., FUNCTION, CODE, DATA, CLASS, NAMESPACE)"
-    )
-    namespace: str = Field(
-        ..., description="Symbol namespace (empty string for global namespace)"
-    )
+    type: str = Field(..., description="Symbol type (e.g., FUNCTION, CODE, DATA, CLASS, NAMESPACE)")
+    namespace: str = Field(..., description="Symbol namespace (empty string for global namespace)")
     source: str = Field(
         ..., description="Symbol origin (e.g., DEFAULT, ANALYSIS, USER_DEFINED, COMPILER)"
     )
@@ -179,7 +190,9 @@ class BinaryMetadata(BaseModel):
         default=None, alias="# of Bytes", description="File size in bytes"
     )
     num_memory_blocks: int | None = Field(
-        default=None, alias="# of Memory Blocks", description="Number of memory blocks/sections in the program"
+        default=None,
+        alias="# of Memory Blocks",
+        description="Number of memory blocks/sections in the program",
     )
     num_instructions: int | None = Field(default=None, alias="# of Instructions")
     num_defined_data: int | None = Field(default=None, alias="# of Defined Data")
@@ -243,10 +256,9 @@ class CallGraphResult(BaseModel):
         ..., description="The type of the call graph visualization."
     )
     graph: str = Field(
-        ...,
-        description="The MermaidJS markdown graph definition (ready for rendering)"
+        ..., description="The MermaidJS markdown graph definition (ready for rendering)"
     )
     mermaid_url: str = Field(
         ...,
-        description="Temporary MermaidJS rendering service URL (may expire, not suitable for long-term storage)"
+        description="Temporary MermaidJS rendering service URL (may expire, not suitable for long-term storage)",
     )

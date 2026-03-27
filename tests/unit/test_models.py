@@ -16,6 +16,7 @@ from pyghidra_mcp.models import (
     StringSearchResults,
     SymbolInfo,
     SymbolSearchResults,
+    ToolError,
 )
 
 
@@ -257,3 +258,34 @@ def test_bytes_read_result_model():
     assert result.address == "0x1234"
     assert result.size == 4
     assert result.data == "01020304"
+
+
+def test_tool_error_model_without_suggestions():
+    """Test the ToolError model without suggestions."""
+    error = ToolError(error="Function 'foo' not found.")
+    assert error.error == "Function 'foo' not found."
+    assert error.suggestions == []
+
+
+def test_tool_error_model_with_suggestions():
+    """Test the ToolError model with suggestions."""
+    error = ToolError(
+        error="Function 'sub_140002C58' not found.",
+        suggestions=["sub_140002C50 @ 0x140002C50", "sub_140002C60 @ 0x140002C60"],
+    )
+    assert error.error == "Function 'sub_140002C58' not found."
+    assert len(error.suggestions) == 2
+    assert error.suggestions[0] == "sub_140002C50 @ 0x140002C50"
+
+
+def test_tool_error_model_serialization():
+    """Test ToolError serializes to JSON correctly for MCP transport."""
+    error = ToolError(
+        error="Symbol 'bar' not found.",
+        suggestions=["baz @ 0x1000"],
+    )
+    data = error.model_dump()
+    assert data == {
+        "error": "Symbol 'bar' not found.",
+        "suggestions": ["baz @ 0x1000"],
+    }
